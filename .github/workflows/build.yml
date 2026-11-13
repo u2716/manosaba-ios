@@ -1,0 +1,155 @@
+name: Build Manosaba Android APK (data-less)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag of the DRAFT release containing the ExeFS zip'
+        required: true
+        type: string
+
+# Job-scoped, not workflow-scoped. `contents: write` is REQUIRED to read
+# draft-release assets (read-only tokens cannot see drafts at all).
+permissions:
+  contents: write
+
+env:
+  DM_ROOT: ${{ github.workspace }}/work
+  DM_GAME: manosaba
+  API: '35'
+  NDK_VERSION: '30.0.14904162'   # verify against PORTING.md; adjust if r30 differs
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages + NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "build-tools;35.0.1" "platforms;android-35" "ndk;${NDK_VERSION}"
+          echo "NDK=$ANDROID_HOME/ndk/${NDK_VERSION}"              >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME"                    >> "$GITHUB_ENV"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install capstone lz4
+          if [ -f tools/requirements.txt ]; then pip install -r tools/requirements.txt; fi
+
+      # First-party `gh` CLI: reads GH_TOKEN from env (never argv), handles
+      # draft releases when the token has write access, never echoes the token.
+      - name: Download ExeFS zip from draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$TAG" \
+            --pattern '*[Ee]xe[Ff][Ss]*.zip' \
+            --dir release-assets \
+            --clobber
+          ls -la release-assets/
+
+      # Pull workspace paths straight from game.json with jq.
+      # If the structure differs, adjust the jq paths below.
+      - name: Read workspace paths from game.json
+        id: ws
+        run: |
+          set -euo pipefail
+          EXEFS=$(jq -r '.workspace.exefs'               games/manosaba/game.json)
+          PRODUCT=$(jq -r '.workspace.product'           games/manosaba/game.json)
+          SHADER_CAP=$(jq -r '.workspace.shader_capture' games/manosaba/game.json)
+          echo "exefs=$EXEFS"               >> "$GITHUB_OUTPUT"
+          echo "product=$PRODUCT"           >> "$GITHUB_OUTPUT"
+          echo "shader_capture=$SHADER_CAP" >> "$GITHUB_OUTPUT"
+
+      - name: Extract ExeFS into workspace
+        run: |
+          set -euo pipefail
+          EXEFS_DIR="$DM_ROOT/${{ steps.ws.outputs.exefs }}"
+          mkdir -p "$EXEFS_DIR"
+          TMP=$(mktemp -d)
+          for z in release-assets/*.zip; do
+            unzip -o "$z" -d "$TMP"
+          done
+          # Finds the folder containing `main`, whether the zip is flat,
+          # wrapped in ExeFS/, or in a single extra directory.
+          SRC=$(find "$TMP" -maxdepth 3 -type f -name main -printf '%h\n' | head -n1)
+          if [ -z "$SRC" ]; then
+            echo "ERROR: 'main' not found in the ExeFS zip" >&2
+            ls -R "$TMP" >&2
+            exit 1
+          fi
+          cp -a "$SRC"/. "$EXEFS_DIR"/
+          echo "ExeFS contents:"
+          ls -la "$EXEFS_DIR"
+
+      - name: Build product from ExeFS
+        run: ./tools/build_product.sh
+        env:
+          DM_ROOT: ${{ env.DM_ROOT }}
+          DM_GAME: ${{ env.DM_GAME }}
+
+      # Optional: only runs if a shader capture is present.
+      - name: Build Vulkan shader bundle (optional)
+        run: |
+          CAP_DIR="$DM_ROOT/${{ steps.ws.outputs.shader_capture }}"
+          if [ -d "$CAP_DIR" ] && [ -n "$(ls -A "$CAP_DIR" 2>/dev/null)" ]; then
+            python3 gfx/tools/dmsh_vk.py
+          else
+            echo "No shader capture found; skipping dmsh_vk.py"
+          fi
+        continue-on-error: true
+
+      # Data-less build: target is `apk`, not `apk-data`. No RomFS, no sysfont.
+      - name: Build data-less APK
+        run: |
+          set -euo pipefail
+          PRODUCT_PATH="$DM_ROOT/${{ steps.ws.outputs.product }}"
+          SHADERS_PATH="$DM_ROOT/build/android/manosaba.dmvk"
+          ARGS=(GAME="$DM_GAME" PRODUCT="$PRODUCT_PATH")
+          [ -f "$SHADERS_PATH" ] && ARGS+=(SHADERS="$SHADERS_PATH")
+          make -C android "${ARGS[@]}" apk
+        env:
+          DM_ROOT: ${{ env.DM_ROOT }}
+          DM_GAME: ${{ env.DM_GAME }}
+          NDK: ${{ env.NDK }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          API: ${{ env.API }}
+
+      - name: Locate APK
+        id: find-apk
+        run: |
+          set -euo pipefail
+          APK=$(find android/build -type f -name '*.apk' ! -name '*-data.apk' | head -n1)
+          [ -n "$APK" ] || { echo "APK not found" >&2; exit 1; }
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          echo "Built: $APK ($(du -h "$APK" | cut -f1))"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: manosaba-apk
+          path: ${{ steps.find-apk.outputs.apk }}
+          if-no-files-found: error
