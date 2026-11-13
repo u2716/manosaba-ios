@@ -8,8 +8,7 @@ on:
         required: true
         type: string
 
-# Job-scoped, not workflow-scoped. `contents: write` is REQUIRED to read
-# draft-release assets (read-only tokens cannot see drafts at all).
+# Required to read assets from a DRAFT release
 permissions:
   contents: write
 
@@ -17,7 +16,7 @@ env:
   DM_ROOT: ${{ github.workspace }}/work
   DM_GAME: manosaba
   API: '35'
-  NDK_VERSION: '30.0.16248370'
+  NDK_VERSION: '30.0.16248370'   # Valid r30 revision
 
 jobs:
   build:
@@ -34,6 +33,7 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      # Using v4.0.4 to fix the removed 'tools' package error
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4.0.4
 
@@ -50,14 +50,13 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Added pyelftools, keystone-engine, unicorn for binary rewriting
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install capstone lz4
+          pip install capstone lz4 pyelftools keystone-engine unicorn
           if [ -f tools/requirements.txt ]; then pip install -r tools/requirements.txt; fi
 
-      # First-party `gh` CLI: reads GH_TOKEN from env (never argv), handles
-      # draft releases when the token has write access, never echoes the token.
       - name: Download ExeFS zip from draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -71,8 +70,6 @@ jobs:
             --clobber
           ls -la release-assets/
 
-      # Pull workspace paths straight from game.json with jq.
-      # If the structure differs, adjust the jq paths below.
       - name: Read workspace paths from game.json
         id: ws
         run: |
@@ -93,8 +90,7 @@ jobs:
           for z in release-assets/*.zip; do
             unzip -o "$z" -d "$TMP"
           done
-          # Finds the folder containing `main`, whether the zip is flat,
-          # wrapped in ExeFS/, or in a single extra directory.
+          # Finds the folder containing 'main', handling nested zips
           SRC=$(find "$TMP" -maxdepth 3 -type f -name main -printf '%h\n' | head -n1)
           if [ -z "$SRC" ]; then
             echo "ERROR: 'main' not found in the ExeFS zip" >&2
@@ -102,7 +98,7 @@ jobs:
             exit 1
           fi
           cp -a "$SRC"/. "$EXEFS_DIR"/
-          echo "ExeFS contents:"
+          echo "=== ExeFS contents ==="
           ls -la "$EXEFS_DIR"
 
       - name: Build product from ExeFS
@@ -111,7 +107,20 @@ jobs:
           DM_ROOT: ${{ env.DM_ROOT }}
           DM_GAME: ${{ env.DM_GAME }}
 
-      # Optional: only runs if a shader capture is present.
+      # If the build fails, this prints the log to the Actions output
+      - name: Show rewriter logs on failure
+        if: failure()
+        run: |
+          set +e
+          echo "=== dm/out tree ==="
+          find "$DM_ROOT/build/cache/dm/out" -type f 2>/dev/null
+          echo
+          for f in $(find "$DM_ROOT/build/cache/dm/out" -name '*.log' -type f 2>/dev/null); do
+            echo "----- $f -----"
+            cat "$f"
+            echo
+          done
+
       - name: Build Vulkan shader bundle (optional)
         run: |
           CAP_DIR="$DM_ROOT/${{ steps.ws.outputs.shader_capture }}"
@@ -122,7 +131,6 @@ jobs:
           fi
         continue-on-error: true
 
-      # Data-less build: target is `apk`, not `apk-data`. No RomFS, no sysfont.
       - name: Build data-less APK
         run: |
           set -euo pipefail
