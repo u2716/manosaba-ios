@@ -17,7 +17,7 @@ env:
   DM_ROOT: ${{ github.workspace }}/work
   DM_GAME: manosaba
   API: '35'
-  NDK_VERSION: '30.0.14904162'   # verify against PORTING.md; adjust if r30 differs
+  NDK_VERSION: '30.0.16248370'
 
 jobs:
   build:
