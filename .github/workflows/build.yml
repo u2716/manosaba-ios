@@ -1,4 +1,4 @@
-name: Build Manosaba Android APK (data-less)
+name: Build Manosaba Android APK (Android 11)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ permissions:
 env:
   DM_ROOT: ${{ github.workspace }}/work
   DM_GAME: manosaba
-  API: '33'
+  API: '30'
   NDK_VERSION: '30.0.16248370'
 
 jobs:
@@ -119,7 +119,7 @@ jobs:
             echo
           done
 
-      - name: Patch Makefile, apk.py, and prepare dummy assets for Linux
+      - name: Patch project for Android 11 (API 30) compatibility
         run: |
           # 1. Fix the hardcoded macOS NDK path
           sed -i 's/darwin-x86_64/linux-x86_64/g' android/Makefile
@@ -127,16 +127,19 @@ jobs:
           # 2. Remove the macOS-only 'sips' command
           sed -i '/sips -Z 432/d' android/Makefile
           
-          # 3. Change native NDK target to API 33 (required for Vulkan 1.3 symbols)
-          sed -i 's/aarch64-linux-android35-clang/aarch64-linux-android33-clang/g' android/Makefile
+          # 3. Change native NDK target to API 30
+          sed -i 's/aarch64-linux-android35-clang/aarch64-linux-android30-clang/g' android/Makefile
           
-          # 4. Change Java D8 target to API 30 (safe for backward compatibility)
+          # 4. Change Java D8 target to API 30
           sed -i 's/--min-api 34/--min-api 30/g' android/Makefile
           
-          # 5. Set apk.py minSdk to 33 to match Vulkan requirements
-          sed -i 's/MIN_SDK = TARGET_SDK = 35/MIN_SDK = 33\nTARGET_SDK = 35/' android/tools/apk.py
+          # 5. Lower minSdk in apk.py to 30
+          sed -i 's/MIN_SDK = TARGET_SDK = 35/MIN_SDK = 30\nTARGET_SDK = 35/' android/tools/apk.py
           
-          # 6. Provide a shim for Android < 35 (tzalloc, tzfree, localtime_rz)
+          # 6. Inject the Vulkan shim into the Makefile's Android sources
+          sed -i 's|compat/sha256.c)|compat/sha256.c compat/vk_shim.c)|' android/Makefile
+          
+          # 7. Provide timezone shims in darwin.h
           cat << 'EOF' >> android/compat/darwin.h
           
           #ifndef __ASSEMBLER__
@@ -150,11 +153,112 @@ jobs:
           #endif
           EOF
           
-          # 7. Provide a valid dummy 1x1 PNG icon for apk.py
+          # 8. Create the Vulkan Shim to fix linker errors on API 30
+          cat << 'EOF' > android/compat/vk_shim.c
+          #include <vulkan/vulkan.h>
+          #include <dlfcn.h>
+          #include <stddef.h>
+
+          void vkCmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo* pDep) {
+              static PFN_vkCmdPipelineBarrier2 real = NULL;
+              if (!real) real = (PFN_vkCmdPipelineBarrier2)dlsym(RTLD_DEFAULT, "vkCmdPipelineBarrier2");
+              if (real) real(cb, pDep);
+          }
+          void vkCmdWriteTimestamp2(VkCommandBuffer cb, VkPipelineStageFlags2 stage, VkQueryPool pool, uint32_t query) {
+              static PFN_vkCmdWriteTimestamp2 real = NULL;
+              if (!real) real = (PFN_vkCmdWriteTimestamp2)dlsym(RTLD_DEFAULT, "vkCmdWriteTimestamp2");
+              if (real) real(cb, stage, pool, query);
+          }
+          VkResult vkQueueSubmit2(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits, VkFence fence) {
+              static PFN_vkQueueSubmit2 real = NULL;
+              if (!real) real = (PFN_vkQueueSubmit2)dlsym(RTLD_DEFAULT, "vkQueueSubmit2");
+              if (real) return real(queue, submitCount, pSubmits, fence);
+              return VK_ERROR_INITIALIZATION_FAILED;
+          }
+          void vkCmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo* pRenderingInfo) {
+              static PFN_vkCmdBeginRendering real = NULL;
+              if (!real) real = (PFN_vkCmdBeginRendering)dlsym(RTLD_DEFAULT, "vkCmdBeginRendering");
+              if (real) real(cb, pRenderingInfo);
+          }
+          void vkCmdEndRendering(VkCommandBuffer cb) {
+              static PFN_vkCmdEndRendering real = NULL;
+              if (!real) real = (PFN_vkCmdEndRendering)dlsym(RTLD_DEFAULT, "vkCmdEndRendering");
+              if (real) real(cb);
+          }
+          VkResult vkWaitSemaphores(VkDevice device, const VkSemaphoreWaitInfo* pWaitInfo, uint64_t timeout) {
+              static PFN_vkWaitSemaphores real = NULL;
+              if (!real) real = (PFN_vkWaitSemaphores)dlsym(RTLD_DEFAULT, "vkWaitSemaphores");
+              if (real) return real(device, pWaitInfo, timeout);
+              return VK_TIMEOUT;
+          }
+          void vkCmdBindVertexBuffers2(VkCommandBuffer cb, uint32_t firstBinding, uint32_t bindingCount, const VkBuffer* pBuffers, const VkDeviceSize* pOffsets, const VkDeviceSize* pSizes, const VkDeviceSize* pStrides) {
+              static PFN_vkCmdBindVertexBuffers2 real = NULL;
+              if (!real) real = (PFN_vkCmdBindVertexBuffers2)dlsym(RTLD_DEFAULT, "vkCmdBindVertexBuffers2");
+              if (real) real(cb, firstBinding, bindingCount, pBuffers, pOffsets, pSizes, pStrides);
+              else vkCmdBindVertexBuffers(cb, firstBinding, bindingCount, pBuffers, pOffsets);
+          }
+          void vkCmdSetCullMode(VkCommandBuffer cb, VkCullModeFlags cullMode) {
+              static PFN_vkCmdSetCullMode real = NULL;
+              if (!real) real = (PFN_vkCmdSetCullMode)dlsym(RTLD_DEFAULT, "vkCmdSetCullMode");
+              if (real) real(cb, cullMode);
+          }
+          void vkCmdSetFrontFace(VkCommandBuffer cb, VkFrontFace frontFace) {
+              static PFN_vkCmdSetFrontFace real = NULL;
+              if (!real) real = (PFN_vkCmdSetFrontFace)dlsym(RTLD_DEFAULT, "vkCmdSetFrontFace");
+              if (real) real(cb, frontFace);
+          }
+          void vkCmdSetPrimitiveTopology(VkCommandBuffer cb, VkPrimitiveTopology topology) {
+              static PFN_vkCmdSetPrimitiveTopology real = NULL;
+              if (!real) real = (PFN_vkCmdSetPrimitiveTopology)dlsym(RTLD_DEFAULT, "vkCmdSetPrimitiveTopology");
+              if (real) real(cb, topology);
+          }
+          void vkCmdSetDepthTestEnable(VkCommandBuffer cb, VkBool32 depthTestEnable) {
+              static PFN_vkCmdSetDepthTestEnable real = NULL;
+              if (!real) real = (PFN_vkCmdSetDepthTestEnable)dlsym(RTLD_DEFAULT, "vkCmdSetDepthTestEnable");
+              if (real) real(cb, depthTestEnable);
+          }
+          void vkCmdSetDepthWriteEnable(VkCommandBuffer cb, VkBool32 depthWriteEnable) {
+              static PFN_vkCmdSetDepthWriteEnable real = NULL;
+              if (!real) real = (PFN_vkCmdSetDepthWriteEnable)dlsym(RTLD_DEFAULT, "vkCmdSetDepthWriteEnable");
+              if (real) real(cb, depthWriteEnable);
+          }
+          void vkCmdSetDepthCompareOp(VkCommandBuffer cb, VkCompareOp depthCompareOp) {
+              static PFN_vkCmdSetDepthCompareOp real = NULL;
+              if (!real) real = (PFN_vkCmdSetDepthCompareOp)dlsym(RTLD_DEFAULT, "vkCmdSetDepthCompareOp");
+              if (real) real(cb, depthCompareOp);
+          }
+          void vkCmdSetStencilTestEnable(VkCommandBuffer cb, VkBool32 stencilTestEnable) {
+              static PFN_vkCmdSetStencilTestEnable real = NULL;
+              if (!real) real = (PFN_vkCmdSetStencilTestEnable)dlsym(RTLD_DEFAULT, "vkCmdSetStencilTestEnable");
+              if (real) real(cb, stencilTestEnable);
+          }
+          void vkCmdSetStencilOp(VkCommandBuffer cb, VkStencilFaceFlags faceMask, VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp, VkCompareOp compareOp) {
+              static PFN_vkCmdSetStencilOp real = NULL;
+              if (!real) real = (PFN_vkCmdSetStencilOp)dlsym(RTLD_DEFAULT, "vkCmdSetStencilOp");
+              if (real) real(cb, faceMask, failOp, passOp, depthFailOp, compareOp);
+          }
+          void vkCmdSetDepthBiasEnable(VkCommandBuffer cb, VkBool32 depthBiasEnable) {
+              static PFN_vkCmdSetDepthBiasEnable real = NULL;
+              if (!real) real = (PFN_vkCmdSetDepthBiasEnable)dlsym(RTLD_DEFAULT, "vkCmdSetDepthBiasEnable");
+              if (real) real(cb, depthBiasEnable);
+          }
+          void vkCmdSetPrimitiveRestartEnable(VkCommandBuffer cb, VkBool32 primitiveRestartEnable) {
+              static PFN_vkCmdSetPrimitiveRestartEnable real = NULL;
+              if (!real) real = (PFN_vkCmdSetPrimitiveRestartEnable)dlsym(RTLD_DEFAULT, "vkCmdSetPrimitiveRestartEnable");
+              if (real) real(cb, primitiveRestartEnable);
+          }
+          void vkCmdSetRasterizerDiscardEnable(VkCommandBuffer cb, VkBool32 rasterizerDiscardEnable) {
+              static PFN_vkCmdSetRasterizerDiscardEnable real = NULL;
+              if (!real) real = (PFN_vkCmdSetRasterizerDiscardEnable)dlsym(RTLD_DEFAULT, "vkCmdSetRasterizerDiscardEnable");
+              if (real) real(cb, rasterizerDiscardEnable);
+          }
+          EOF
+          
+          # 9. Provide a valid dummy 1x1 PNG icon
           mkdir -p android/build/manosaba
           echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" | base64 -d > android/build/manosaba/icon.png
           
-          # 8. Provide a dummy empty Vulkan shader bundle to bypass the Makefile check
+          # 10. Provide a dummy empty Vulkan shader bundle
           mkdir -p "$DM_ROOT/build/android"
           touch "$DM_ROOT/build/android/manosaba.dmvk"
 
@@ -166,7 +270,7 @@ jobs:
           
           make -C android \
             GAME="$DM_GAME" \
-            CC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang" \
+            CC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang" \
             NDK="$ANDROID_HOME/ndk/$NDK_VERSION" \
             ANDROID_SDK="$ANDROID_HOME" \
             JAVA_HOME="$JAVA_HOME" \
