@@ -99,6 +99,7 @@ jobs:
           SRC=$(find "$TMP" -maxdepth 3 -type f -name main -printf '%h\n' | head -n1)
           if [ -z "$SRC" ]; then
             echo "ERROR: 'main' not found in the ExeFS zip" >&2
+            ls -R "$TMP" >&2
             exit 1
           fi
           cp -a "$SRC"/. "$EXEFS_DIR"/
@@ -116,21 +117,32 @@ jobs:
           for f in $(find "$DM_ROOT/build/cache/dm/out" -name '*.log' -type f 2>/dev/null); do
             echo "----- $f -----"
             cat "$f"
+            echo
           done
 
-      - name: Patch Makefile and prepare dummy assets for Linux
+      - name: Patch Makefile, apk.py, and prepare dummy assets for Linux
         run: |
-          # 1. Fix the hardcoded macOS NDK path in the Makefile
+          # 1. Fix the hardcoded macOS NDK path
           sed -i 's/darwin-x86_64/linux-x86_64/g' android/Makefile
           
           # 2. Remove the macOS-only 'sips' command
           sed -i '/sips -Z 432/d' android/Makefile
           
-          # 3. Provide a valid dummy 1x1 PNG icon for apk.py
+          # 3. LOWER THE MIN SDK IN THE MAKEFILE
+          # Native C code: change NDK target to API 30
+          sed -i 's/aarch64-linux-android35-clang/aarch64-linux-android30-clang/g' android/Makefile
+          # Java code: change D8 target to API 30
+          sed -i 's/--min-api 34/--min-api 30/g' android/Makefile
+          
+          # 4. LOWER THE MIN SDK IN apk.py
+          # Split the assignment so targetSdk stays at 35, but minSdk becomes 30
+          sed -i 's/MIN_SDK = TARGET_SDK = 35/MIN_SDK = 30\nTARGET_SDK = 35/' android/tools/apk.py
+          
+          # 5. Provide a valid dummy 1x1 PNG icon for apk.py
           mkdir -p android/build/manosaba
           echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" | base64 -d > android/build/manosaba/icon.png
           
-          # 4. Provide a dummy empty Vulkan shader bundle to bypass the Makefile check
+          # 6. Provide a dummy empty Vulkan shader bundle to bypass the Makefile check
           mkdir -p "$DM_ROOT/build/android"
           touch "$DM_ROOT/build/android/manosaba.dmvk"
 
@@ -142,12 +154,12 @@ jobs:
           
           make -C android \
             GAME="$DM_GAME" \
-            CC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android$API-clang" \
+            CC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang" \
             NDK="$ANDROID_HOME/ndk/$NDK_VERSION" \
             ANDROID_SDK="$ANDROID_HOME" \
             JAVA_HOME="$JAVA_HOME" \
             D8="$ANDROID_HOME/build-tools/35.0.1/d8" \
-            ANDROID_JAR="$ANDROID_HOME/platforms/android-$API/android.jar" \
+            ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar" \
             PRODUCT="$PRODUCT_PATH" \
             SHADERS="$SHADERS_PATH" \
             apk
