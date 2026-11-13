@@ -33,7 +33,6 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      # Using v4.0.4 to fix the removed 'tools' package error
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4.0.4
 
@@ -50,12 +49,19 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Added pyelftools, keystone-engine, unicorn for binary rewriting
-      - name: Install Python dependencies
+      # Creates the exact venv path the build script expects
+      - name: Create Python virtual environment for build
         run: |
-          python -m pip install --upgrade pip
-          pip install capstone lz4 pyelftools keystone-engine unicorn
-          if [ -f tools/requirements.txt ]; then pip install -r tools/requirements.txt; fi
+          set -euo pipefail
+          VENV_DIR="$DM_ROOT/build/cache/dm/venv"
+          mkdir -p "$DM_ROOT/build/cache/dm"
+          python3 -m venv "$VENV_DIR"
+          "$VENV_DIR/bin/pip" install --upgrade pip
+          "$VENV_DIR/bin/pip" install capstone lz4 pyelftools keystone-engine unicorn
+          if [ -f tools/requirements.txt ]; then 
+            "$VENV_DIR/bin/pip" install -r tools/requirements.txt
+          fi
+          echo "VENV created at $VENV_DIR"
 
       - name: Download ExeFS zip from draft release
         env:
@@ -90,7 +96,6 @@ jobs:
           for z in release-assets/*.zip; do
             unzip -o "$z" -d "$TMP"
           done
-          # Finds the folder containing 'main', handling nested zips
           SRC=$(find "$TMP" -maxdepth 3 -type f -name main -printf '%h\n' | head -n1)
           if [ -z "$SRC" ]; then
             echo "ERROR: 'main' not found in the ExeFS zip" >&2
@@ -107,7 +112,6 @@ jobs:
           DM_ROOT: ${{ env.DM_ROOT }}
           DM_GAME: ${{ env.DM_GAME }}
 
-      # If the build fails, this prints the log to the Actions output
       - name: Show rewriter logs on failure
         if: failure()
         run: |
