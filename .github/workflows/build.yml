@@ -138,11 +138,27 @@ jobs:
           # Split the assignment so targetSdk stays at 35, but minSdk becomes 30
           sed -i 's/MIN_SDK = TARGET_SDK = 35/MIN_SDK = 30\nTARGET_SDK = 35/' android/tools/apk.py
           
-          # 5. Provide a valid dummy 1x1 PNG icon for apk.py
+          # 5. Provide a shim for Android < 35 (tzalloc, tzfree, localtime_rz)
+          mkdir -p android/compat
+          cat << 'EOF' > android/compat/tz_shim.h
+          #pragma once
+          #include <time.h>
+          #include <stdlib.h>
+          #if defined(__ANDROID__) && __ANDROID_API__ < 35
+          static inline timezone_t tzalloc(const char *name) { (void)name; return (timezone_t)1; }
+          static inline void tzfree(timezone_t tz) { (void)tz; }
+          static inline struct tm *localtime_rz(timezone_t tz, const time_t *timep, struct tm *result) { (void)tz; return localtime_r(timep, result); }
+          #endif
+          EOF
+          
+          # Add the shim to CFLAGS in the Makefile
+          sed -i 's|-include compat/darwin.h|-include compat/darwin.h -include compat/tz_shim.h|' android/Makefile
+          
+          # 6. Provide a valid dummy 1x1 PNG icon for apk.py
           mkdir -p android/build/manosaba
           echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" | base64 -d > android/build/manosaba/icon.png
           
-          # 6. Provide a dummy empty Vulkan shader bundle to bypass the Makefile check
+          # 7. Provide a dummy empty Vulkan shader bundle to bypass the Makefile check
           mkdir -p "$DM_ROOT/build/android"
           touch "$DM_ROOT/build/android/manosaba.dmvk"
 
