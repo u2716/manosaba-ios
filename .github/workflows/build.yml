@@ -49,7 +49,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Creates the exact venv path the build script expects
       - name: Create Python virtual environment for build
         run: |
           set -euo pipefail
@@ -61,7 +60,6 @@ jobs:
           if [ -f tools/requirements.txt ]; then 
             "$VENV_DIR/bin/pip" install -r tools/requirements.txt
           fi
-          echo "VENV created at $VENV_DIR"
 
       - name: Download ExeFS zip from draft release
         env:
@@ -135,12 +133,13 @@ jobs:
           fi
         continue-on-error: true
 
+      # FIX: Forced HOST_TAG to linux-x86_64 so make uses the Ubuntu NDK toolchain
       - name: Build data-less APK
         run: |
           set -euo pipefail
           PRODUCT_PATH="$DM_ROOT/${{ steps.ws.outputs.product }}"
           SHADERS_PATH="$DM_ROOT/build/android/manosaba.dmvk"
-          ARGS=(GAME="$DM_GAME" PRODUCT="$PRODUCT_PATH")
+          ARGS=(GAME="$DM_GAME" PRODUCT="$PRODUCT_PATH" HOST_TAG=linux-x86_64)
           [ -f "$SHADERS_PATH" ] && ARGS+=(SHADERS="$SHADERS_PATH")
           make -C android "${ARGS[@]}" apk
         env:
