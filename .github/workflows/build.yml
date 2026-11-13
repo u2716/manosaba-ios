@@ -8,14 +8,13 @@ on:
         required: true
         type: string
 
-# Required to read assets from a DRAFT release
 permissions:
   contents: write
 
 env:
   DM_ROOT: ${{ github.workspace }}/work
   DM_GAME: manosaba
-  API: '35'
+  API: '33'
   NDK_VERSION: '30.0.16248370'
 
 jobs:
@@ -27,7 +26,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Required for `git rev-list --count HEAD` in the Makefile
+          fetch-depth: 0
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -128,18 +127,16 @@ jobs:
           # 2. Remove the macOS-only 'sips' command
           sed -i '/sips -Z 432/d' android/Makefile
           
-          # 3. LOWER THE MIN SDK IN THE MAKEFILE
-          # Native C code: change NDK target to API 30
-          sed -i 's/aarch64-linux-android35-clang/aarch64-linux-android30-clang/g' android/Makefile
-          # Java code: change D8 target to API 30
+          # 3. Change native NDK target to API 33 (required for Vulkan 1.3 symbols)
+          sed -i 's/aarch64-linux-android35-clang/aarch64-linux-android33-clang/g' android/Makefile
+          
+          # 4. Change Java D8 target to API 30 (safe for backward compatibility)
           sed -i 's/--min-api 34/--min-api 30/g' android/Makefile
           
-          # 4. LOWER THE MIN SDK IN apk.py
-          # Split the assignment so targetSdk stays at 35, but minSdk becomes 30
-          sed -i 's/MIN_SDK = TARGET_SDK = 35/MIN_SDK = 30\nTARGET_SDK = 35/' android/tools/apk.py
+          # 5. Set apk.py minSdk to 33 to match Vulkan requirements
+          sed -i 's/MIN_SDK = TARGET_SDK = 35/MIN_SDK = 33\nTARGET_SDK = 35/' android/tools/apk.py
           
-          # 5. Provide a shim for Android < 35 (tzalloc, tzfree, localtime_rz)
-          # Wrap in #ifndef __ASSEMBLER__ so .S files don't break, and append to existing compat header.
+          # 6. Provide a shim for Android < 35 (tzalloc, tzfree, localtime_rz)
           cat << 'EOF' >> android/compat/darwin.h
           
           #ifndef __ASSEMBLER__
@@ -153,11 +150,11 @@ jobs:
           #endif
           EOF
           
-          # 6. Provide a valid dummy 1x1 PNG icon for apk.py
+          # 7. Provide a valid dummy 1x1 PNG icon for apk.py
           mkdir -p android/build/manosaba
           echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" | base64 -d > android/build/manosaba/icon.png
           
-          # 7. Provide a dummy empty Vulkan shader bundle to bypass the Makefile check
+          # 8. Provide a dummy empty Vulkan shader bundle to bypass the Makefile check
           mkdir -p "$DM_ROOT/build/android"
           touch "$DM_ROOT/build/android/manosaba.dmvk"
 
@@ -169,7 +166,7 @@ jobs:
           
           make -C android \
             GAME="$DM_GAME" \
-            CC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang" \
+            CC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang" \
             NDK="$ANDROID_HOME/ndk/$NDK_VERSION" \
             ANDROID_SDK="$ANDROID_HOME" \
             JAVA_HOME="$JAVA_HOME" \
