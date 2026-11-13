@@ -16,6 +16,7 @@ env:
   DM_GAME: manosaba
   API: '30'
   NDK_VERSION: '30.0.16248370'
+  DM_TARGET: 'android'  # Global target for scripts
 
 jobs:
   build:
@@ -108,6 +109,7 @@ jobs:
         env:
           DM_ROOT: ${{ env.DM_ROOT }}
           DM_GAME: ${{ env.DM_GAME }}
+          DM_TARGET: android
 
       - name: Show rewriter logs on failure
         if: failure()
