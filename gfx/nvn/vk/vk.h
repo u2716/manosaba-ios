@@ -19,7 +19,8 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
-#include <vulkan/vulkan.h>
+#include "vk_dispatch.h"
+#include "vk_loader.h"
 #include "../nvn_backend.h"
 #include "../nvn_mtl.h"
 #include "../nvn_obj.h"

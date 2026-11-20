@@ -209,13 +209,15 @@ def data_entries(name, d):
     stored = os.environ.get('T_APK_BROKEN') != 'datadeflate'   # (the broken variant of t_apk.py: the data deflated)
     return [(f'assets/{name}.idx', idx, True, 1)] + [(f'assets/{name}/{f}', os.path.join(d, f), not stored, 4 if stored else 1) for f in files]
 
-def build(lib, lib_name, pkg, label, version_code, version_name, icon, assets, key, debuggable, dex=None, data=(), out=None):
+def build(lib, lib_name, pkg, label, version_code, version_name, icon, assets, key, debuggable, dex=None, data=(), out=None, extra_libs=()):
     """The APK, written to out (a path) or returned as bytes; data: (name, folder) pairs carried as data_entries"""
     sign, cert, spki = signing_key(key)
     entries = [('AndroidManifest.xml', axml(manifest(pkg, label, version_code, version_name, lib_name, bool(icon), debuggable, bool(dex))), True, 1)]
     if dex: entries += [('classes.dex', open(dex, 'rb').read(), True, 1)]
     if icon: entries += [('resources.arsc', arsc_icon(pkg), False, 4), (ICON_PATH, open(icon, 'rb').read(), False, 4)]
     entries += [(f'lib/arm64-v8a/lib{lib_name}.so', open(lib, 'rb').read(), False, 16384)]
+    for el in extra_libs:
+        entries += [(f'lib/arm64-v8a/{os.path.basename(el)}', open(el, 'rb').read(), False, 16384)]
     entries += [(f'assets/{n}', open(f, 'rb').read(), True, 1) for n, f in assets]
     for name, d in data: entries += data_entries(name, d)
     f = open(out, 'w+b') if out else io.BytesIO()
@@ -229,6 +231,7 @@ def main():
     p.add_argument('--lib', required=True); p.add_argument('--out', required=True); p.add_argument('--package', required=True); p.add_argument('--label', required=True)
     p.add_argument('--lib-name', default='dmhost'); p.add_argument('--version-code', type=int, default=1); p.add_argument('--version-name', default='1')
     p.add_argument('--icon'); p.add_argument('--dex'); p.add_argument('--asset', action='append', default=[], metavar='NAME=FILE')
+    p.add_argument('--extra-lib', action='append', default=[], metavar='FILE')
     p.add_argument('--data', action='append', default=[], metavar='NAME=DIR', help='a folder of game data carried in the APK (data_entries)')
     p.add_argument('--product'); p.add_argument('--modules', default='')
     p.add_argument('--key', default=os.path.expanduser('~/.config/dm-android/apk-key.pem')); p.add_argument('--release', action='store_true', help='not debuggable')
@@ -241,7 +244,7 @@ def main():
         assets += [(f'product/{os.path.basename(f)}', f) for f in [os.path.join(a.product, f'{m}.patched.bin') for m in mods] + paths]
     data = [tuple(x.split('=', 1)) for x in a.data]
     tmp = a.out + '.tmp'
-    build(a.lib, a.lib_name, a.package, a.label, a.version_code, a.version_name, a.icon, assets, a.key, not a.release, a.dex, data, tmp); os.replace(tmp, a.out)
+    build(a.lib, a.lib_name, a.package, a.label, a.version_code, a.version_name, a.icon, assets, a.key, not a.release, a.dex, data, tmp, a.extra_lib); os.replace(tmp, a.out)
     print(f'apk: {a.out} {os.path.getsize(a.out) / 1e6:.1f} MB, {a.package} {a.version_name} ({a.version_code}), {len(assets)} assets' +
           ''.join(f', {n} carried' for n, _ in data))
 

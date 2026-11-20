@@ -32,6 +32,7 @@
 #include "romfs_validate.h"
 #include "settings.h"
 #include "data_apk.h"
+#include "driver_adpkg.h"
 
 int dm_main(int argc, char **argv);   // host/runtime/main.c, built with -Dmain=dm_main
 void front_android_install(ANativeActivity *a);   // front_android.c: the activity's callbacks
@@ -288,6 +289,7 @@ static void boot(ANativeActivity *a) {
     snprintf(save, sizeof save, "%s/save", g_int); snprintf(temp, sizeof temp, "%s/temp", g_int);
     snprintf(cache, sizeof cache, "%s", g_int); { char *s = strrchr(cache, '/'); if (s) snprintf(s, sizeof cache - (size_t)(s - cache), "/cache/cache_storage"); }
     mkdirs(save); mkdirs(temp); mkdirs(cache);
+    dm_android_driver_setup(a, g_ext, g_int);
     setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0); setenv("DM_CACHE", cache, 0);
     { char pc[700]; snprintf(pc, sizeof pc, "%s", cache); char *s = strrchr(pc, '/'); if (s) { snprintf(s, sizeof pc - (size_t)(s - pc), "/vk_pipeline_cache.bin"); setenv("DM_VK_PCACHE", pc, 0); } }   // (308e: the app's cache folder)
     { struct stat st; if (!stat(font, &st) && S_ISDIR(st.st_mode)) setenv("DM_SYSFONT", font, 0); }

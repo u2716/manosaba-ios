@@ -9,6 +9,7 @@
 NDK ?= /opt/homebrew/share/android-ndk
 API ?= 35
 CC := $(NDK)/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android$(API)-clang
+CXX := $(subst clang,clang++,$(CC))
 GAME ?= manosaba
 H := ../host
 GAMEDIR := ../games/$(GAME)
@@ -20,7 +21,9 @@ REWRITER_STAMP := $(shell python3 ../tools/rewriter_stamp.py $(wildcard $(GAMEDI
 # -Wno-format: uint64_t is unsigned long here and the shared sources print it with %ll (the same 64 bits; the Apple build keeps -Wformat).
 # -fPIC (not the default PIE): the objects go into the app's library too, whose thread-local variables need the dynamic TLS model
 CFLAGS = -O1 -g -fPIC -Wall -Wno-unused-function -Wno-format -Wno-deprecated-declarations -fno-omit-frame-pointer -D_GNU_SOURCE \
-	-DDM_REWRITER_STAMP=0x$(REWRITER_STAMP)ull -I$(H) -I../gfx/nvn/include -I$(GAMEDIR) -Icompat -include compat/darwin.h
+	-DDM_REWRITER_STAMP=0x$(REWRITER_STAMP)ull -I$(H) -I../gfx/nvn/include -I$(GAMEDIR) -Icompat -include compat/darwin.h \
+	-I../third_party/adrenotools/include -I../third_party/adrenotools/lib/linkernsbypass -I../third_party/adrenotools/src -I../third_party/adrenotools/src/hook
+CXXFLAGS = $(CFLAGS) -std=c++17 -fexceptions -frtti
 # The shared host sources Android takes: every service, the runtime, what changes the game, the portable diagnostics and front-end helpers
 HOST_SRC = $(sort $(wildcard $(H)/hle/hle_*.c)) $(H)/hle/hle.c \
 	$(addprefix $(H)/runtime/,crash.c hstack.c loader.c main.c options.c romfs_parts.c romfs_validate.c thread.c entry.S hstack.S) \
@@ -31,9 +34,18 @@ HOST_SRC = $(sort $(wildcard $(H)/hle/hle_*.c)) $(H)/hle/hle.c \
 # (gfx/nvn/null: nothing drawn) under adb, the Vulkan one (gfx/nvn/vk, plan item 301e) in the app
 GFX_SRC = ../gfx/hle_vi.c ../gfx/hle_nv.c $(addprefix ../gfx/nvn/,hle_nvn.c nvn_dirty.c nvn_tex.c nvn_trace.c nvn_entry.S nvn_thunks.S) \
 	$(sort $(wildcard ../gfx/nvn/core/*.c)) ../gfx/tex/nvn_fmt_mtl.c ../gfx/tex/nvn_deswizzle.c ../gfx/nvn/null/readings.c
-ANDROID_SRC = $(addprefix ../android/,diag_android.c movie_android.c plat_linux.c settings.c slots.c compat/sha256.c)
+ANDROID_SRC = $(addprefix ../android/,diag_android.c movie_android.c plat_linux.c settings.c slots.c driver_adpkg.c compat/sha256.c)
 GAME_SRC = $(sort $(wildcard $(GAMEDIR)/*.c))
 VK_SRC = $(sort $(wildcard ../gfx/nvn/vk/*.c))
+ADRENOTOOLS_SRC = ../third_party/adrenotools/src/driver.cpp \
+	../third_party/adrenotools/lib/linkernsbypass/android_linker_ns.cpp \
+	../third_party/adrenotools/lib/linkernsbypass/elf_soname_patcher.cpp
+ADRENOTOOLS_OBJ = $(patsubst ../%,$(B)/obj/%.o,$(ADRENOTOOLS_SRC))
+HOOK_IMPL_SRC = ../third_party/adrenotools/src/hook/hook_impl.cpp \
+	../third_party/adrenotools/lib/linkernsbypass/android_linker_ns.cpp \
+	../third_party/adrenotools/lib/linkernsbypass/elf_soname_patcher.cpp
+HOOK_IMPL_OBJ = $(patsubst ../%,$(B)/obj/%.o,$(HOOK_IMPL_SRC))
+HOOK_LIBS = $(B)/libhook_impl.so $(B)/libmain_hook.so
 OBJ = $(patsubst ../%,$(B)/obj/%.o,$(HOST_SRC) $(GFX_SRC) $(ANDROID_SRC) $(GAME_SRC)) $(B)/obj/game_profile.c.o
 NULL_OBJ = $(B)/obj/gfx/nvn/null/null.c.o
 VK_OBJ = $(patsubst ../%,$(B)/obj/%.o,$(VK_SRC))
@@ -48,22 +60,38 @@ $(B)/obj/%.c.o: ../%.c $(B)/flags.txt
 $(B)/obj/%.S.o: ../%.S $(B)/flags.txt
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+$(B)/obj/%.cpp.o: ../%.cpp $(B)/flags.txt
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
 $(B)/game_profile.c: $(GAMEDIR)/game.json ../tools/gen_game.py
 	@mkdir -p $(B)
 	python3 ../tools/gen_game.py $< $@.tmp && mv $@.tmp $@
 $(B)/obj/game_profile.c.o: $(B)/game_profile.c $(B)/flags.txt
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
--include $(OBJ:.o=.d) $(NULL_OBJ:.o=.d) $(VK_OBJ:.o=.d) $(B)/obj/android/front_headless.c.d $(B)/obj/android/app_android.c.d $(B)/obj/android/front_android.c.d $(B)/obj/android/data_apk.c.d
+-include $(OBJ:.o=.d) $(NULL_OBJ:.o=.d) $(VK_OBJ:.o=.d) $(ADRENOTOOLS_OBJ:.o=.d) $(HOOK_IMPL_OBJ:.o=.d) $(B)/obj/third_party/adrenotools/src/hook/main_hook.c.d $(B)/obj/android/front_headless.c.d $(B)/obj/android/app_android.c.d $(B)/obj/android/front_android.c.d $(B)/obj/android/data_apk.c.d
 $(B)/dmhost: $(OBJ) $(NULL_OBJ) $(B)/obj/android/front_headless.c.o
 	$(CC) -o $@ $^ -lm -ldl -landroid -laaudio -lmediandk
+
+# Adrenotools hooks
+$(B)/libhook_impl.so: $(HOOK_IMPL_OBJ)
+	@mkdir -p $(@D)
+	$(CXX) -shared -o $@ $^ -Wl,-soname,libhook_impl.so -static-libstdc++ -llog -ldl -landroid
+
+$(B)/obj/third_party/adrenotools/src/hook/main_hook.c.o: ../third_party/adrenotools/src/hook/main_hook.c $(B)/flags.txt
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+$(B)/libmain_hook.so: $(B)/obj/third_party/adrenotools/src/hook/main_hook.c.o $(B)/libhook_impl.so
+	@mkdir -p $(@D)
+	$(CC) -shared -o $@ $< $(B)/libhook_impl.so -Wl,-soname,libmain_hook.so -Wl,-rpath,\$$ORIGIN
 
 # The app's library: NativeActivity loads it and calls ANativeActivity_onCreate (app_android.c). -Bsymbolic: the assembly's branches and adrp to
 # the library's own global symbols (dm_hcall, nvn_slot ...) bind inside it, with no PLT stub (one would take x16 / x17, which the thunks pass) and
 # no text relocation; its symbols stay in the dynamic table for dladdr and dlsym (the crash report, the thread dumps)
 APP_OBJ = $(B)/obj/android/app_android.c.o $(B)/obj/android/front_android.c.o $(B)/obj/android/data_apk.c.o
-$(B)/libdmhost.so: $(OBJ) $(VK_OBJ) $(APP_OBJ)
-	$(CC) -shared -o $@ $^ -Wl,-soname,libdmhost.so -Wl,-Bsymbolic -Wl,--no-undefined -landroid -lnativewindow -llog -laaudio -lmediandk -lvulkan -lz -lm -ldl
+$(B)/libdmhost.so: $(OBJ) $(VK_OBJ) $(APP_OBJ) $(ADRENOTOOLS_OBJ)
+	$(CXX) -shared -o $@ $^ -Wl,-soname,libdmhost.so -Wl,-Bsymbolic -Wl,--no-undefined -landroid -lnativewindow -llog -laaudio -lmediandk -lz -lm -ldl -static-libstdc++
 
 # The APK (android/tools/apk.py): the library, the product's files the loader reads (the modules' images and what ios/tools/product_files.py lists), the icon.
 # PRODUCT: the android product (default $DM_ROOT/build/android/<game>.b301, DM_ROOT the workspace, ../work when unset); SHADERS: the Vulkan shader
@@ -90,11 +118,12 @@ $(B)/classes.dex: $(JAVA_SRC)
 	rm -rf $(B)/java && mkdir -p $(B)/java
 	$(JAVA_HOME)/bin/javac --release 11 -Xlint:-options -classpath $(ANDROID_JAR) -d $(B)/java $(JAVA_SRC)
 	JAVA_HOME=$(JAVA_HOME) $(D8) --min-api 34 --lib $(ANDROID_JAR) --output $(B) $$(find $(B)/java -name '*.class')   # (this d8 knows API levels up to 34)
-$(B)/$(GAME).apk: $(B)/libdmhost.so $(B)/classes.dex tools/apk.py FORCE
+$(B)/$(GAME).apk: $(B)/libdmhost.so $(HOOK_LIBS) $(B)/classes.dex tools/apk.py FORCE
 	@test -f "$(SHADERS)" || { echo "[red] no shader bundle at $(SHADERS): DM_GAME=$(GAME) gfx/tools/dmsh_vk.py <captures> <it>"; exit 1; }
 	sips -Z 432 -s format png "$(WS)/$(ICON)" --out $(B)/icon.png > /dev/null
 	python3 tools/apk.py --lib $(B)/libdmhost.so --dex $(B)/classes.dex --out $@ --package $(PKG) --label "$(LABEL)" --icon $(B)/icon.png $(if $(filter 1,$(RELEASE)),--release) \
 		--version-code $$(git rev-list --count HEAD) --version-name $$(git rev-parse --short HEAD) --product "$(PRODUCT)" --modules "$(MODS)" \
+		--asset "hooks/libmain_hook.so=$(B)/libmain_hook.so" --asset "hooks/libhook_impl.so=$(B)/libhook_impl.so" \
 		--asset "product/shaders.dmvk=$(SHADERS)"
 apk: $(B)/$(GAME).apk
 # The same app with the game's data in it (plan item 301h; the player's own RomFS and the console's fonts, from the workspace: game.json's
@@ -102,12 +131,13 @@ apk: $(B)/$(GAME).apk
 # out on its first start (data_apk.c)
 ROMFS_WS := $(shell python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['workspace'].get('romfs', ''))" $(GAMEDIR)/game.json)
 SYSFONT_WS := $(shell python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['workspace'].get('sysfont', ''))" $(GAMEDIR)/game.json)
-$(B)/$(GAME)-data.apk: $(B)/libdmhost.so $(B)/classes.dex tools/apk.py FORCE
+$(B)/$(GAME)-data.apk: $(B)/libdmhost.so $(HOOK_LIBS) $(B)/classes.dex tools/apk.py FORCE
 	@test -f "$(SHADERS)" || { echo "[red] no shader bundle at $(SHADERS)"; exit 1; }
 	@test -d "$(WS)/$(ROMFS_WS)" -a -d "$(WS)/$(SYSFONT_WS)" || { echo "[red] no RomFS / fonts at $(WS)/$(ROMFS_WS), $(WS)/$(SYSFONT_WS)"; exit 1; }
 	sips -Z 432 -s format png "$(WS)/$(ICON)" --out $(B)/icon.png > /dev/null
 	python3 tools/apk.py --lib $(B)/libdmhost.so --dex $(B)/classes.dex --out $@ --package $(PKG) --label "$(LABEL)" --icon $(B)/icon.png $(if $(filter 1,$(RELEASE)),--release) \
 		--version-code $$(git rev-list --count HEAD) --version-name $$(git rev-parse --short HEAD) --product "$(PRODUCT)" --modules "$(MODS)" \
+		--asset "hooks/libmain_hook.so=$(B)/libmain_hook.so" --asset "hooks/libhook_impl.so=$(B)/libhook_impl.so" \
 		--asset "product/shaders.dmvk=$(SHADERS)" --data "romfs=$(WS)/$(ROMFS_WS)" --data "sysfont=$(WS)/$(SYSFONT_WS)"
 apk-data: $(B)/$(GAME)-data.apk
 lib: $(B)/libdmhost.so
@@ -170,7 +200,8 @@ build/tests/movie.webm: | build/tests
 # the Vulkan backend without a window, with the core modules it calls (plan item 301e1), and its draws' shaders (301e2)
 VKT_SRC = tests/t_vk_be.c $(VK_SRC) $(addprefix ../gfx/nvn/core/,core.c state.c pend.c usnap.c tbdr.c store_index.c prog.c upd.c frame.c guard.c rt.c) ../gfx/nvn/nvn_tex.c ../gfx/nvn/nvn_dirty.c \
 	../gfx/tex/nvn_deswizzle.c
-VKT_FLAGS = -O1 -g -Wall -Wno-format -D_GNU_SOURCE -I$(H) -I../gfx/nvn/include -I../gfx/nvn/vk -Icompat -include compat/darwin.h
+VKT_FLAGS = -O1 -g -Wall -Wno-format -D_GNU_SOURCE -I$(H) -I../gfx/nvn/include -I../gfx/nvn/vk -Icompat -include compat/darwin.h \
+	-I../third_party/adrenotools/include -I../third_party/adrenotools/lib/linkernsbypass -I../third_party/adrenotools/src -I../third_party/adrenotools/src/hook
 build/tests/t_vk_be: $(VKT_SRC) | build/tests
 	$(CC) $(VKT_FLAGS) -o $@ $(VKT_SRC) -lvulkan -landroid -lnativewindow -lz -lm
 build/tests/t_vk_be_early: $(VKT_SRC) | build/tests

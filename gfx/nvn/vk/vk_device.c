@@ -19,6 +19,7 @@ uint32_t vk_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryProperty
 static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name) { for (uint32_t i = 0; i < n; i++) if (!strcmp(e[i].extensionName, name)) return 1; return 0; }
 
 static void init(void) {
+    vk_loader_init();
     VkApplicationInfo ai = {VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "dm", .apiVersion = VK_API_VERSION_1_3};
     const char *iext[] = {VK_KHR_SURFACE_EXTENSION_NAME, "VK_KHR_android_surface"};
     uint32_t nie = 0; vkEnumerateInstanceExtensionProperties(NULL, &nie, NULL);
@@ -26,6 +27,7 @@ static void init(void) {
     V.android_surface = has_ext(ie, nie, iext[0]) && has_ext(ie, nie, iext[1]); free(ie);
     VkInstanceCreateInfo ici = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = V.android_surface ? 2 : 0, .ppEnabledExtensionNames = iext};
     VK(vkCreateInstance(&ici, NULL, &V.inst));
+    vk_dispatch_init_instance(V.inst);
     uint32_t npd = 1; VkPhysicalDevice pd[1];
     if (vkEnumeratePhysicalDevices(V.inst, &npd, pd) < 0 || !npd) VDIE("no Vulkan device");
     V.pd = pd[0]; vkGetPhysicalDeviceProperties(V.pd, &V.props); vkGetPhysicalDeviceMemoryProperties(V.pd, &V.mem);
@@ -92,6 +94,7 @@ static void init(void) {
     VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = V.qf, .queueCount = 1, .pQueuePriorities = &prio};
     VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &f2, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .enabledExtensionCount = ndx, .ppEnabledExtensionNames = dext};
     VK(vkCreateDevice(V.pd, &dci, NULL, &V.dev));
+    vk_dispatch_init_device(V.dev);
     vkGetDeviceQueue(V.dev, V.qf, 0, &V.q);
     pthread_mutex_init(&V.qmu, NULL);
     V.map2 = (PFN_vkMapMemory2KHR)vkGetDeviceProcAddr(V.dev, "vkMapMemory2KHR");
