@@ -6,6 +6,7 @@
 #include "driver_adpkg.h"
 #include <android/asset_manager.h>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
@@ -287,15 +288,15 @@ static void copy_hook_from_assets(AAssetManager *am, const char *asset_name, con
     if (stat(dst_path, &st) == 0 && st.st_size > 0) return;
     AAsset *a = AAssetManager_open(am, asset_name, AASSET_MODE_BUFFER);
     if (!a) return;
-    const void *buf = AAsset_getBuffer(a);
-    off_t len = AAsset_getLength(a);
-    if (buf && len > 0) {
-        FILE *f = fopen(dst_path, "wb");
-        if (f) {
-            fwrite(buf, 1, len, f);
-            fclose(f);
-            chmod(dst_path, 0755);
+    FILE *f = fopen(dst_path, "wb");
+    if (f) {
+        char buf[8192];
+        int n;
+        while ((n = AAsset_read(a, buf, sizeof buf)) > 0) {
+            fwrite(buf, 1, n, f);
         }
+        fclose(f);
+        chmod(dst_path, 0755);
     }
     AAsset_close(a);
 }
@@ -381,7 +382,7 @@ int dm_android_driver_setup(ANativeActivity *a, const char *ext_dir, const char 
         return 0;
     }
 
-    // Setup hook libraries if bundled as assets
+    // Setup hook libraries if bundled as assets (fallback)
     if (a && a->assetManager) {
         char h1[1024], h2[1024];
         snprintf(h1, sizeof h1, "%s/libmain_hook.so", hooks_dir);
@@ -390,10 +391,27 @@ int dm_android_driver_setup(ANativeActivity *a, const char *ext_dir, const char 
         copy_hook_from_assets(a->assetManager, "hooks/libhook_impl.so", h2);
     }
 
-    // Check if applicationInfo has nativeLibraryDir with hooks
-    char hook_dir_use[1024];
-    snprintf(hook_dir_use, sizeof hook_dir_use, "%s", hooks_dir);
-    if (a && a->env && a->clazz) {
+    // First preference: find hook libraries in nativeLibraryDir using dladdr on ourselves
+    char hook_dir_use[1024] = "";
+    Dl_info dlinfo;
+    if (dladdr((void *)&dm_android_driver_setup, &dlinfo) && dlinfo.dli_fname) {
+        char dir[1024];
+        snprintf(dir, sizeof dir, "%s", dlinfo.dli_fname);
+        char *slash = strrchr(dir, '/');
+        if (slash) {
+            *slash = '\0';
+            char check[1024];
+            snprintf(check, sizeof check, "%s/libmain_hook.so", dir);
+            struct stat st_h;
+            if (stat(check, &st_h) == 0) {
+                snprintf(hook_dir_use, sizeof hook_dir_use, "%s", dir);
+                LOG("driver: found hook libraries via dladdr in %s", hook_dir_use);
+            }
+        }
+    }
+
+    // Second preference: check JNI nativeLibraryDir
+    if (!hook_dir_use[0] && a && a->env && a->clazz) {
         JNIEnv *E = a->env;
         jclass C = (*E)->GetObjectClass(E, a->clazz);
         jmethodID m_ai = (*E)->GetMethodID(E, C, "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
@@ -412,6 +430,7 @@ int dm_android_driver_setup(ANativeActivity *a, const char *ext_dir, const char 
                             struct stat st_h;
                             if (stat(check, &st_h) == 0) {
                                 snprintf(hook_dir_use, sizeof hook_dir_use, "%s", nld);
+                                LOG("driver: found hook libraries via JNI in %s", hook_dir_use);
                             }
                             (*E)->ReleaseStringUTFChars(E, s, nld);
                         }
@@ -423,6 +442,12 @@ int dm_android_driver_setup(ANativeActivity *a, const char *ext_dir, const char 
             }
         }
         (*E)->DeleteLocalRef(E, C);
+    }
+
+    // Third preference: fallback to internal storage hooks dir
+    if (!hook_dir_use[0]) {
+        snprintf(hook_dir_use, sizeof hook_dir_use, "%s", hooks_dir);
+        LOG("driver: using internal hooks directory %s", hook_dir_use);
     }
 
     LOG("driver: custom GPU driver configured: %s [%s] (library: %s)",

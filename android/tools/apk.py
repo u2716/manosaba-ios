@@ -52,7 +52,7 @@ NONE = 0xffffffff
 def manifest(pkg, label, version_code, version_name, lib, icon, debuggable, code=False):
     """The manifest as (tag, [(android namespace?, name, value)], children); a value is a str, bool, int, ('hex', n) or ('ref', resource id)"""
     app = [(True, 'label', label)] + ([(True, 'icon', ('ref', ICON_ID))] if icon else []) + [
-        (True, 'hasCode', code), (True, 'debuggable', debuggable), (True, 'allowBackup', False), (True, 'extractNativeLibs', False),
+        (True, 'hasCode', code), (True, 'debuggable', debuggable), (True, 'allowBackup', False), (True, 'extractNativeLibs', True),
         (True, 'appCategory', CATEGORY_GAME)]
     act = [(True, 'name', 'android.app.NativeActivity'), (True, 'exported', True), (True, 'launchMode', SINGLE_TASK),
            (True, 'screenOrientation', SENSOR_LANDSCAPE), (True, 'configChanges', ('hex', CONFIG_CHANGES)), (True, 'resizeableActivity', False)]

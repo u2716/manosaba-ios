@@ -76,7 +76,7 @@ $(B)/dmhost: $(OBJ) $(NULL_OBJ) $(B)/obj/android/front_headless.c.o
 # Adrenotools hooks
 $(B)/libhook_impl.so: $(HOOK_IMPL_OBJ)
 	@mkdir -p $(@D)
-	$(CXX) -shared -o $@ $^ -Wl,-soname,libhook_impl.so -static-libstdc++ -llog -ldl -landroid
+	$(CXX) -shared -o $@ $^ -Wl,-soname,libhook_impl.so -Wl,-z,global -static-libstdc++ -llog -ldl -landroid
 
 $(B)/obj/third_party/adrenotools/src/hook/main_hook.c.o: ../third_party/adrenotools/src/hook/main_hook.c $(B)/flags.txt
 	@mkdir -p $(@D)
@@ -84,7 +84,7 @@ $(B)/obj/third_party/adrenotools/src/hook/main_hook.c.o: ../third_party/adrenoto
 
 $(B)/libmain_hook.so: $(B)/obj/third_party/adrenotools/src/hook/main_hook.c.o $(B)/libhook_impl.so
 	@mkdir -p $(@D)
-	$(CC) -shared -o $@ $< $(B)/libhook_impl.so -Wl,-soname,libmain_hook.so -Wl,-rpath,\$$ORIGIN
+	$(CC) -shared -o $@ $< $(B)/libhook_impl.so -Wl,-soname,libmain_hook.so -Wl,-z,global -Wl,-rpath,'$$ORIGIN'
 
 # The app's library: NativeActivity loads it and calls ANativeActivity_onCreate (app_android.c). -Bsymbolic: the assembly's branches and adrp to
 # the library's own global symbols (dm_hcall, nvn_slot ...) bind inside it, with no PLT stub (one would take x16 / x17, which the thunks pass) and
@@ -123,6 +123,7 @@ $(B)/$(GAME).apk: $(B)/libdmhost.so $(HOOK_LIBS) $(B)/classes.dex tools/apk.py F
 	sips -Z 432 -s format png "$(WS)/$(ICON)" --out $(B)/icon.png > /dev/null
 	python3 tools/apk.py --lib $(B)/libdmhost.so --dex $(B)/classes.dex --out $@ --package $(PKG) --label "$(LABEL)" --icon $(B)/icon.png $(if $(filter 1,$(RELEASE)),--release) \
 		--version-code $$(git rev-list --count HEAD) --version-name $$(git rev-parse --short HEAD) --product "$(PRODUCT)" --modules "$(MODS)" \
+		--extra-lib $(B)/libmain_hook.so --extra-lib $(B)/libhook_impl.so \
 		--asset "hooks/libmain_hook.so=$(B)/libmain_hook.so" --asset "hooks/libhook_impl.so=$(B)/libhook_impl.so" \
 		--asset "product/shaders.dmvk=$(SHADERS)"
 apk: $(B)/$(GAME).apk
@@ -137,6 +138,7 @@ $(B)/$(GAME)-data.apk: $(B)/libdmhost.so $(HOOK_LIBS) $(B)/classes.dex tools/apk
 	sips -Z 432 -s format png "$(WS)/$(ICON)" --out $(B)/icon.png > /dev/null
 	python3 tools/apk.py --lib $(B)/libdmhost.so --dex $(B)/classes.dex --out $@ --package $(PKG) --label "$(LABEL)" --icon $(B)/icon.png $(if $(filter 1,$(RELEASE)),--release) \
 		--version-code $$(git rev-list --count HEAD) --version-name $$(git rev-parse --short HEAD) --product "$(PRODUCT)" --modules "$(MODS)" \
+		--extra-lib $(B)/libmain_hook.so --extra-lib $(B)/libhook_impl.so \
 		--asset "hooks/libmain_hook.so=$(B)/libmain_hook.so" --asset "hooks/libhook_impl.so=$(B)/libhook_impl.so" \
 		--asset "product/shaders.dmvk=$(SHADERS)" --data "romfs=$(WS)/$(ROMFS_WS)" --data "sysfont=$(WS)/$(SYSFONT_WS)"
 apk-data: $(B)/$(GAME)-data.apk

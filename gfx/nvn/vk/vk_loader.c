@@ -4,6 +4,7 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #if defined(__ANDROID__)
 #include <adrenotools/driver.h>
@@ -41,12 +42,33 @@ void vk_loader_init(void) {
             dir_with_slash[--len] = '\0';
         }
 
-        VLOG("loading custom Vulkan driver via adrenotools (hook_dir=%s)...", hook_dir ? hook_dir : "default");
+        Dl_info dlinfo;
+        char native_lib_dir[1024] = "";
+        if (dladdr((void *)&vk_loader_init, &dlinfo) && dlinfo.dli_fname) {
+            snprintf(native_lib_dir, sizeof native_lib_dir, "%s", dlinfo.dli_fname);
+            char *slash = strrchr(native_lib_dir, '/');
+            if (slash) *slash = '\0';
+        }
+
+        const char *effective_hook_dir = hook_dir;
+        if (native_lib_dir[0]) {
+            char check[1024];
+            snprintf(check, sizeof check, "%s/libmain_hook.so", native_lib_dir);
+            struct stat st;
+            if (stat(check, &st) == 0) {
+                effective_hook_dir = native_lib_dir;
+            }
+        }
+        if (!effective_hook_dir || !effective_hook_dir[0]) {
+            effective_hook_dir = native_lib_dir[0] ? native_lib_dir : NULL;
+        }
+
+        VLOG("loading custom Vulkan driver via adrenotools (hook_dir=%s)...", effective_hook_dir ? effective_hook_dir : "default");
         g_vk_handle = adrenotools_open_libvulkan(
-            RTLD_NOW | RTLD_GLOBAL,
+            RTLD_NOW | RTLD_LOCAL,
             ADRENOTOOLS_DRIVER_CUSTOM,
-            dir_with_slash,
-            hook_dir,
+            NULL,
+            effective_hook_dir,
             dir_with_slash,
             driver_name,
             NULL,

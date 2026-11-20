@@ -12,8 +12,8 @@
 #include "hook_impl_params.h"
 #include "hook_impl.h"
 
-#define TAG "hook_impl"
-#define LOGI(fmt, ...) __android_log_print(ANDROID_LOG_INFO, TAG, fmt, ##__VA_ARGS__)
+#define TAG "adrenotools"
+#define LOGI(fmt, ...) __android_log_print(ANDROID_LOG_INFO, TAG, "[adrenotools] " fmt, ##__VA_ARGS__)
 
 const HookImplParams *hook_params; //!< Bunch of info needed to load/patch the driver
 int (*gsl_memory_alloc_pure_sym)(uint32_t, uint32_t, void *);
@@ -37,27 +37,27 @@ __attribute__((visibility("default"))) void init_gsl(void *alloc, void *alloc64,
 
 __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char *filename, int flags, const android_dlextinfo *extinfo) {
     auto fallback{[&]() {
-        LOGI("hook_android_dlopen_ext: falling back!");
+        LOGI("hook_android_dlopen_ext: falling back to system android_dlopen_ext for %s!", filename ? filename : "null");
         return android_dlopen_ext(filename, flags, extinfo);
     }};
 
-    LOGI("hook_android_dlopen_ext: filename: %s", filename);
+    LOGI("hook_android_dlopen_ext: filename: %s", filename ? filename : "null");
 
     // Ignore non-vulkan libraries
-    if (!strstr(filename, "vulkan."))
+    if (!filename || !strstr(filename, "vulkan."))
         return android_dlopen_ext(filename, flags, extinfo);
 
-    if (extinfo->library_namespace == nullptr || !(extinfo->flags & ANDROID_DLEXT_USE_NAMESPACE)) {
-        LOGI("hook_android_dlopen_ext: hook failed: namespace not supplied!");
-        return fallback();
+    android_namespace_t *parentNs = nullptr;
+    if (extinfo && (extinfo->flags & ANDROID_DLEXT_USE_NAMESPACE) && extinfo->library_namespace) {
+        parentNs = extinfo->library_namespace;
     }
 
     // customDriverDir will be empty if ADRENOTOOLS_DRIVER_CUSTOM isn't set therefore it's fine to have either way
     auto driverNs{android_create_namespace(filename, hook_params->customDriverDir.c_str(),
                                            hook_params->hookLibDir.c_str(), ANDROID_NAMESPACE_TYPE_SHARED,
-                                           nullptr, extinfo->library_namespace)};
+                                           nullptr, parentNs)};
     if (!driverNs) {
-        LOGI("hook_android_dlopen_ext: hook failed: namespace not supplied!");
+        LOGI("hook_android_dlopen_ext: android_create_namespace failed for %s!", filename);
         return fallback();
     }
 
@@ -67,8 +67,10 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
     // Preload ourself, a new instance will be created since we have different linker ancestory
     // If we don't preload we get a weird issue where despite being in NEEDED of the hook lib the hook's symbols will overwrite ours and cause an infinite loop
     auto hookImpl{linkernsbypass_namespace_dlopen("libhook_impl.so", RTLD_NOW, driverNs)};
-    if (!hookImpl)
+    if (!hookImpl) {
+        LOGI("hook_android_dlopen_ext: failed to preload libhook_impl.so in driverNs!");
         return nullptr;
+    }
 
     // Pass parameters to ourself
     auto initHookParam{reinterpret_cast<void (*)(const void *)>(dlsym(hookImpl, "init_hook_param"))};
@@ -87,7 +89,9 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
     }
 
     // Use our new namespace to load the vulkan driver
-    auto newExtinfo{*extinfo};
+    android_dlextinfo newExtinfo{};
+    if (extinfo) newExtinfo = *extinfo;
+    newExtinfo.flags |= ANDROID_DLEXT_USE_NAMESPACE;
     newExtinfo.library_namespace = driverNs;
 
     if (hook_params->featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) {
@@ -122,16 +126,15 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
             LOGI("hook_android_dlopen_ext: hook failed: failed to apply libgsl_alloc_hook!");
     }
 
-    // TODO: If there is already an instance of a Vulkan driver loaded hooks won't be applied, this will only be the case for skiavk generally
-    // To fix this we would need to search /proc/self/maps for the file to a loaded instance of the library in order to read it to patch the soname and load it uniquely
     if (hook_params->featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) {
-        LOGI("hook_android_dlopen_ext: loading custom driver: %s%s", hook_params->customDriverDir.c_str(), hook_params->customDriverName.c_str());
+        LOGI("hook_android_dlopen_ext: loading custom Vulkan driver: %s%s", hook_params->customDriverDir.c_str(), hook_params->customDriverName.c_str());
         void *handle{android_dlopen_ext(hook_params->customDriverName.c_str(), flags, &newExtinfo)};
         if (!handle) {
-            LOGI("hook_android_dlopen_ext: hook failed: failed to load custom driver: %s!", dlerror());
+            LOGI("hook_android_dlopen_ext: hook failed: failed to load custom driver (%s): %s!", hook_params->customDriverName.c_str(), dlerror());
             return fallback();
         }
 
+        LOGI("hook_android_dlopen_ext: custom Vulkan driver successfully loaded: %s (handle=%p)", hook_params->customDriverName.c_str(), handle);
         return handle;
     } else {
         LOGI("hook_android_dlopen_ext: loading default driver: %s", filename);
@@ -140,7 +143,7 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
 }
 
 __attribute__((visibility("default"))) void *hook_android_load_sphal_library(const char *filename, int flags) {
-    LOGI("hook_android_load_sphal_library: filename: %s", filename);
+    LOGI("hook_android_load_sphal_library: vulkan filename: %s", filename ? filename : "null");
 
     // https://android.googlesource.com/platform/system/core/+/master/libvndksupport/linker.cpp
     for (const char *name : {"sphal", "vendor", "default"}) {
@@ -150,11 +153,13 @@ __attribute__((visibility("default"))) void *hook_android_load_sphal_library(con
                 .library_namespace = vendorNs,
             };
 
-            return hook_android_dlopen_ext(filename, flags, &dlextinfo);
+            void *h = hook_android_dlopen_ext(filename, flags, &dlextinfo);
+            if (h) return h;
         }
     }
 
-    return nullptr;
+    LOGI("hook_android_load_sphal_library: no exported namespace returned driver, fallback to direct hook_android_dlopen_ext for %s", filename ? filename : "null");
+    return hook_android_dlopen_ext(filename, flags, nullptr);
 }
 
 __attribute__((visibility("default"))) FILE *hook_fopen(const char *filename, const char *mode) {
