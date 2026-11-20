@@ -131,6 +131,12 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
         void *handle{android_dlopen_ext(hook_params->customDriverName.c_str(), flags, &newExtinfo)};
         if (!handle) {
             LOGI("hook_android_dlopen_ext: hook failed: failed to load custom driver (%s): %s!", hook_params->customDriverName.c_str(), dlerror());
+            std::string fullPath = hook_params->customDriverDir + hook_params->customDriverName;
+            handle = dlopen(fullPath.c_str(), flags);
+            if (handle) {
+                LOGI("hook_android_dlopen_ext: loaded custom Vulkan driver via fallback dlopen: %s", fullPath.c_str());
+                return handle;
+            }
             return fallback();
         }
 
@@ -145,16 +151,22 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
 __attribute__((visibility("default"))) void *hook_android_load_sphal_library(const char *filename, int flags) {
     LOGI("hook_android_load_sphal_library: vulkan filename: %s", filename ? filename : "null");
 
-    // https://android.googlesource.com/platform/system/core/+/master/libvndksupport/linker.cpp
-    for (const char *name : {"sphal", "vendor", "default"}) {
-        if (auto vendorNs{android_get_exported_namespace(name)}) {
-            android_dlextinfo dlextinfo{
-                .flags = ANDROID_DLEXT_USE_NAMESPACE,
-                .library_namespace = vendorNs,
-            };
+    if (hook_params && (hook_params->featureFlags & ADRENOTOOLS_DRIVER_CUSTOM)) {
+        LOGI("hook_android_load_sphal_library: custom driver mode, routing directly to hook_android_dlopen_ext");
+        return hook_android_dlopen_ext(filename, flags, nullptr);
+    }
 
-            void *h = hook_android_dlopen_ext(filename, flags, &dlextinfo);
-            if (h) return h;
+    if (android_get_exported_namespace) {
+        for (const char *name : {"sphal", "vendor", "default"}) {
+            if (auto vendorNs{android_get_exported_namespace(name)}) {
+                android_dlextinfo dlextinfo{
+                    .flags = ANDROID_DLEXT_USE_NAMESPACE,
+                    .library_namespace = vendorNs,
+                };
+
+                void *h = hook_android_dlopen_ext(filename, flags, &dlextinfo);
+                if (h) return h;
+            }
         }
     }
 
