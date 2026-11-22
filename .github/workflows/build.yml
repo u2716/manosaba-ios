@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Tag of the DRAFT release containing the ExeFS zip'
+        description: 'Tag of the DRAFT release containing the ExeFS zip and the captures zip'
         required: true
         type: string
 
@@ -21,7 +21,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -59,11 +59,11 @@ jobs:
           python3 -m venv "$VENV_DIR"
           "$VENV_DIR/bin/pip" install --upgrade pip
           "$VENV_DIR/bin/pip" install capstone lz4 pyelftools keystone-engine unicorn
-          if [ -f tools/requirements.txt ]; then 
+          if [ -f tools/requirements.txt ]; then
             "$VENV_DIR/bin/pip" install -r tools/requirements.txt
           fi
 
-      - name: Download ExeFS zip from draft release
+      - name: Download ExeFS zip and shader captures from draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.release_tag }}
@@ -72,9 +72,18 @@ jobs:
           mkdir -p release-assets
           gh release download "$TAG" \
             --pattern '*[Ee]xe[Ff][Ss]*.zip' \
+            --pattern 'manosaba-captures.zip' \
             --dir release-assets \
             --clobber
           ls -la release-assets/
+
+          mkdir -p release-assets/captures
+          unzip -q release-assets/manosaba-captures.zip -d release-assets/captures
+          CTL_COUNT=$(find release-assets/captures -maxdepth 1 -name '*.ctl' | wc -l)
+          DATA_COUNT=$(find release-assets/captures -maxdepth 1 -name '*.data' | wc -l)
+          echo "captures: $CTL_COUNT .ctl / $DATA_COUNT .data"
+          [ "$CTL_COUNT" -gt 0 ] || { echo "ERROR: no .ctl files in manosaba-captures.zip"; ls -la release-assets/captures; exit 1; }
+          [ "$CTL_COUNT" = "$DATA_COUNT" ] || { echo "ERROR: .ctl / .data count mismatch"; exit 1; }
 
       - name: Read workspace paths from game.json
         id: ws
@@ -125,22 +134,22 @@ jobs:
         run: |
           # 1. Fix the hardcoded macOS NDK path
           sed -i 's/darwin-x86_64/linux-x86_64/g' android/Makefile
-          
+
           # 2. Remove the macOS-only 'sips' command
           sed -i '/sips -Z 432/d' android/Makefile
-          
+
           # 3. Change native NDK target to API 30
           sed -i 's/aarch64-linux-android35-clang/aarch64-linux-android30-clang/g' android/Makefile
-          
+
           # 4. Change Java D8 target to API 30
           sed -i 's/--min-api 34/--min-api 30/g' android/Makefile
-          
+
           # 5. Lower minSdk in apk.py to 30
           sed -i 's/MIN_SDK = TARGET_SDK = 35/MIN_SDK = 30\nTARGET_SDK = 35/' android/tools/apk.py
-          
+
           # 6. Provide timezone shims in darwin.h
           cat << 'EOF' >> android/compat/darwin.h
-          
+
           #ifndef __ASSEMBLER__
           #include <time.h>
           #include <stdlib.h>
@@ -151,21 +160,92 @@ jobs:
           #endif
           #endif
           EOF
-          
+
           # 7. Provide a valid dummy 1x1 PNG icon
+          #    (still needed because step 2 removed the only step that produced $(B)/icon.png)
           mkdir -p android/build/manosaba
           echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" | base64 -d > android/build/manosaba/icon.png
-          
-          # 8. Provide a dummy empty Vulkan shader bundle
+
+          # 8. (REMOVED) the dummy empty shader bundle — dmsh_vk.py builds the real one in CI below.
+
+      - name: Set up .NET (for dmsh_xlate)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+          # ↑ change to match <TargetFramework> in gfx/tools/dmsh_xlate/dmsh_xlate.csproj
+          #   (e.g. '9.0.x' if the csproj says net9.0)
+
+      - name: Install spirv-cross
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y spirv-cross || true
+          if ! command -v spirv-cross >/dev/null; then
+            echo "spirv-cross not in apt; building from source"
+            git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Cross /tmp/spirv-cross
+            cmake -S /tmp/spirv-cross -B /tmp/spirv-cross/build \
+              -DCMAKE_BUILD_TYPE=Release -DSPIRV_CROSS_CLI=ON -DSPIRV_CROSS_ENABLE_TESTS=OFF
+            cmake --build /tmp/spirv-cross/build -j
+            sudo cmake --install /tmp/spirv-cross/build
+          fi
+          spirv-cross --help | head -1
+
+      - name: Build dmsh_xlate (Switch bytecode → SPIR-V translator)
+        run: |
+          set -euo pipefail
+          OUT="$DM_ROOT/build/gfx/dmsh_xlate"
+          dotnet build -c Release gfx/tools/dmsh_xlate/dmsh_xlate.csproj -o "$OUT"
+          XLATE="$OUT/dmsh_xlate"
+          if [ ! -x "$XLATE" ] && [ -f "$OUT/dmsh_xlate.dll" ]; then
+            echo "apphost missing; wrapping dmsh_xlate.dll"
+            cat > "$XLATE" <<'SH'
+          #!/bin/sh
+          exec dotnet "$(dirname "$0")/dmsh_xlate.dll" "$@"
+          SH
+            chmod +x "$XLATE"
+          fi
+          test -x "$XLATE" || { echo "ERROR: dmsh_xlate not executable"; ls -la "$OUT"; exit 1; }
+          "$XLATE" --source-sha || true
+
+      - name: Build the Vulkan shader bundle (dmsh_vk.py)
+        run: |
+          set -euo pipefail
+          # dmsh_vk.py hardcodes 'shader-tools/darwin-x86_64/spirv-val'. Fake a Darwin NDK tree that
+          # points at the Android NDK's linux-x86_64 spirv-val, so no source patch is needed.
+          NDK_FAKE=/tmp/fake-ndk
+          mkdir -p "$NDK_FAKE/shader-tools"
+          ln -sfn "$ANDROID_HOME/ndk/$NDK_VERSION/shader-tools/linux-x86_64" "$NDK_FAKE/shader-tools/darwin-x86_64"
+          test -x "$NDK_FAKE/shader-tools/darwin-x86_64/spirv-val" || { echo "ERROR: spirv-val not found in NDK"; ls -la "$ANDROID_HOME/ndk/$NDK_VERSION/shader-tools"; exit 1; }
+
+          export NDK="$NDK_FAKE"
+          export DM_GAME=manosaba
+          export XLATE="$DM_ROOT/build/gfx/dmsh_xlate/dmsh_xlate"
+          export DOTNET_ROOT="$(dirname "$(readlink -f "$(command -v dotnet)")")"
+
           mkdir -p "$DM_ROOT/build/android"
-          touch "$DM_ROOT/build/android/manosaba.dmvk"
+          python3 gfx/tools/dmsh_vk.py \
+            release-assets/captures \
+            "$DM_ROOT/build/android/manosaba.dmvk" \
+            2>&1 | tee /tmp/dmvk.log
+
+          python3 - <<'PY'
+          import struct, os, sys
+          p = os.path.join(os.environ["DM_ROOT"], "build", "android", "manosaba.dmvk")
+          b = open(p, "rb").read(12)
+          assert b[:4] == b"DMVK", f"not a DMVK bundle: header {b[:4]!r}"
+          v, n = struct.unpack("<II", b[4:])
+          print(f"bundle: {p}  version {v}  {n} shaders  {os.path.getsize(p)/1e6:.1f} MB")
+          if n < 2000:
+              sys.exit(f"ERROR: too few shaders ({n}); see /tmp/dmvk.log")
+          PY
 
       - name: Build data-less APK
         run: |
           set -euo pipefail
           PRODUCT_PATH="$DM_ROOT/${{ steps.ws.outputs.product }}"
           SHADERS_PATH="$DM_ROOT/build/android/manosaba.dmvk"
-          
+          [ -s "$SHADERS_PATH" ] || { echo "ERROR: shader bundle missing or empty at $SHADERS_PATH" >&2; exit 1; }
+
           make -C android \
             GAME="$DM_GAME" \
             CC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang" \
