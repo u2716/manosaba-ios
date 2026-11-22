@@ -76,7 +76,7 @@ $(B)/dmhost: $(OBJ) $(NULL_OBJ) $(B)/obj/android/front_headless.c.o
 # Adrenotools hooks
 $(B)/libhook_impl.so: $(HOOK_IMPL_OBJ)
 	@mkdir -p $(@D)
-	$(CXX) -shared -o $@ $^ -Wl,-soname,libhook_impl.so -Wl,-z,global -static-libstdc++ -llog -ldl -landroid
+	$(CXX) -shared -o $@ $^ -Wl,-soname,libhook_impl.so -static-libstdc++ -llog -ldl -landroid
 
 $(B)/obj/third_party/adrenotools/src/hook/main_hook.c.o: ../third_party/adrenotools/src/hook/main_hook.c $(B)/flags.txt
 	@mkdir -p $(@D)

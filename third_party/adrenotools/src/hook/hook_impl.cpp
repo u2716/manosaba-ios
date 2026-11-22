@@ -43,9 +43,14 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
 
     LOGI("hook_android_dlopen_ext: filename: %s", filename ? filename : "null");
 
+    if (!hook_params) {
+        LOGI("hook_android_dlopen_ext: hook_params is null, calling fallback!");
+        return fallback();
+    }
+
     // Ignore non-vulkan libraries
     if (!filename || !strstr(filename, "vulkan."))
-        return android_dlopen_ext(filename, flags, extinfo);
+        return fallback();
 
     android_namespace_t *parentNs = nullptr;
     if (extinfo && (extinfo->flags & ANDROID_DLEXT_USE_NAMESPACE) && extinfo->library_namespace) {
@@ -58,6 +63,14 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
                                            nullptr, parentNs)};
     if (!driverNs) {
         LOGI("hook_android_dlopen_ext: android_create_namespace failed for %s!", filename);
+        if (hook_params->featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) {
+            std::string fullPath = hook_params->customDriverDir + hook_params->customDriverName;
+            void *handle = dlopen(fullPath.c_str(), flags);
+            if (handle) {
+                LOGI("hook_android_dlopen_ext: loaded custom Vulkan driver via direct dlopen fallback: %s", fullPath.c_str());
+                return handle;
+            }
+        }
         return fallback();
     }
 
@@ -69,7 +82,15 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
     auto hookImpl{linkernsbypass_namespace_dlopen("libhook_impl.so", RTLD_NOW, driverNs)};
     if (!hookImpl) {
         LOGI("hook_android_dlopen_ext: failed to preload libhook_impl.so in driverNs!");
-        return nullptr;
+        if (hook_params->featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) {
+            std::string fullPath = hook_params->customDriverDir + hook_params->customDriverName;
+            void *handle = dlopen(fullPath.c_str(), flags);
+            if (handle) {
+                LOGI("hook_android_dlopen_ext: loaded custom Vulkan driver via direct dlopen fallback after hookImpl failed: %s", fullPath.c_str());
+                return handle;
+            }
+        }
+        return fallback();
     }
 
     // Pass parameters to ourself
