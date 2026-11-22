@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Tag of the DRAFT release containing the ExeFS zip and the captures zip'
+        description: 'Tag of the DRAFT release containing the ExeFS zip, captures zip and AppIcon.png'
         required: true
         type: string
 
@@ -63,7 +63,7 @@ jobs:
             "$VENV_DIR/bin/pip" install -r tools/requirements.txt
           fi
 
-      - name: Download ExeFS zip and shader captures from draft release
+      - name: Download ExeFS zip, captures, and app icon from draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.release_tag }}
@@ -73,10 +73,12 @@ jobs:
           gh release download "$TAG" \
             --pattern '*[Ee]xe[Ff][Ss]*.zip' \
             --pattern 'manosaba-captures.zip' \
+            --pattern '*[Ii]con*.png' \
             --dir release-assets \
             --clobber
           ls -la release-assets/
 
+          # Captures
           mkdir -p release-assets/captures
           unzip -q release-assets/manosaba-captures.zip -d release-assets/captures
           CTL_COUNT=$(find release-assets/captures -maxdepth 1 -name '*.ctl' | wc -l)
@@ -84,6 +86,19 @@ jobs:
           echo "captures: $CTL_COUNT .ctl / $DATA_COUNT .data"
           [ "$CTL_COUNT" -gt 0 ] || { echo "ERROR: no .ctl files in manosaba-captures.zip"; ls -la release-assets/captures; exit 1; }
           [ "$CTL_COUNT" = "$DATA_COUNT" ] || { echo "ERROR: .ctl / .data count mismatch"; exit 1; }
+
+          # Icon — normalize the name, verify PNG magic
+          ICON_SRC=$(find release-assets -maxdepth 1 -iname '*icon*.png' | head -n1)
+          [ -n "$ICON_SRC" ] || { echo "ERROR: no *icon*.png in draft release"; ls -la release-assets/; exit 1; }
+          cp "$ICON_SRC" release-assets/AppIcon.png
+          python3 - <<'PY'
+          import os
+          p = "release-assets/AppIcon.png"
+          b = open(p, "rb").read(8)
+          if b != b"\x89PNG\r\n\x1a\n":
+              raise SystemExit(f"ERROR: {p} is not a PNG (first 8 bytes: {b.hex()})")
+          print(f"icon: {p}  {os.path.getsize(p)} bytes")
+          PY
 
       - name: Read workspace paths from game.json
         id: ws
@@ -161,12 +176,10 @@ jobs:
           #endif
           EOF
 
-          # 7. Provide a valid dummy 1x1 PNG icon
-          #    (still needed because step 2 removed the only step that produced $(B)/icon.png)
+          # 7. Place the real app icon (downloaded from the draft release in the step above)
           mkdir -p android/build/manosaba
-          echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" | base64 -d > android/build/manosaba/icon.png
+          cp release-assets/AppIcon.png android/build/manosaba/icon.png
 
-          # 8. (REMOVED) the dummy empty shader bundle — dmsh_vk.py builds the real one in CI below.
 
       - name: Set up .NET (for dmsh_xlate)
         uses: actions/setup-dotnet@v4
