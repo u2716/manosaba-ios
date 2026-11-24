@@ -1,0 +1,242 @@
+name: Build Manosaba JP Android APK (Android 11)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Draft release with manosaba-jp-exefs.zip, manosaba-jp-captures.zip, AppIcon.png'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  DM_ROOT: ${{ github.workspace }}/work
+  DM_GAME: manosaba-jp
+  API: '30'
+  NDK_VERSION: '30.0.16248370'
+  DM_TARGET: 'android'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4.0.4
+
+      - name: Install SDK packages + NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "build-tools;35.0.1" "platforms;android-35" "ndk;${NDK_VERSION}"
+          echo "NDK=$ANDROID_HOME/ndk/${NDK_VERSION}"              >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME"                    >> "$GITHUB_ENV"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Create Python venv
+        run: |
+          set -euo pipefail
+          VENV_DIR="$DM_ROOT/build/cache/dm/venv"
+          mkdir -p "$DM_ROOT/build/cache/dm"
+          python3 -m venv "$VENV_DIR"
+          "$VENV_DIR/bin/pip" install --upgrade pip
+          "$VENV_DIR/bin/pip" install capstone lz4 pyelftools keystone-engine unicorn
+          if [ -f tools/requirements.txt ]; then
+            "$VENV_DIR/bin/pip" install -r tools/requirements.txt
+          fi
+
+      - name: Download JP ExeFS, JP captures, and app icon
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$TAG" \
+            --pattern 'manosaba-jp-exefs.zip' \
+            --pattern 'manosaba-jp-captures.zip' \
+            --pattern '*[Ii]con*.png' \
+            --dir release-assets \
+            --clobber
+          ls -la release-assets/
+
+          mkdir -p release-assets/captures
+          unzip -q release-assets/manosaba-jp-captures.zip -d release-assets/captures
+          CTL=$(find release-assets/captures -maxdepth 1 -name '*.ctl' | wc -l)
+          DAT=$(find release-assets/captures -maxdepth 1 -name '*.data' | wc -l)
+          echo "captures: $CTL .ctl / $DAT .data"
+          [ "$CTL" -gt 0 ] && [ "$CTL" = "$DAT" ] || { echo "ERROR: capture count mismatch"; exit 1; }
+
+          ICON_SRC=$(find release-assets -maxdepth 1 -iname '*icon*.png' | head -n1)
+          [ -n "$ICON_SRC" ] || { echo "ERROR: no icon PNG"; exit 1; }
+          [ "$ICON_SRC" != "release-assets/AppIcon.png" ] && mv "$ICON_SRC" release-assets/AppIcon.png
+          python3 - <<'P'
+          b = open("release-assets/AppIcon.png", "rb").read(8)
+          assert b == b"\x89PNG\r\n\x1a\n", f"not a PNG: {b.hex()}"
+          print("icon OK")
+          P
+
+      - name: Read workspace paths from game.json
+        id: ws
+        run: |
+          set -euo pipefail
+          EXEFS=$(jq -r '.workspace.exefs'               games/manosaba-jp/game.json)
+          PRODUCT=$(jq -r '.workspace.product'           games/manosaba-jp/game.json)
+          echo "exefs=$EXEFS"     >> "$GITHUB_OUTPUT"
+          echo "product=$PRODUCT" >> "$GITHUB_OUTPUT"
+
+      - name: Extract JP ExeFS into workspace
+        run: |
+          set -euo pipefail
+          EXEFS_DIR="$DM_ROOT/${{ steps.ws.outputs.exefs }}"
+          mkdir -p "$EXEFS_DIR"
+          TMP=$(mktemp -d)
+          unzip -q release-assets/manosaba-jp-exefs.zip -d "$TMP"
+          SRC=$(find "$TMP" -maxdepth 3 -type f -name main -printf '%h\n' | head -n1)
+          [ -n "$SRC" ] || { echo "main not found"; ls -R "$TMP"; exit 1; }
+          cp -a "$SRC"/. "$EXEFS_DIR"/
+
+      - name: Build product (rewrite main/sdk/subsdk0)
+        run: ./tools/build_product.sh
+        env:
+          DM_ROOT: ${{ env.DM_ROOT }}
+          DM_GAME: ${{ env.DM_GAME }}
+          DM_TARGET: android
+
+      - name: Show rewriter logs on failure
+        if: failure()
+        run: |
+          set +e
+          for f in $(find "$DM_ROOT/build/cache/dm/out" -name '*.log' -type f 2>/dev/null); do
+            echo "----- $f -----"; cat "$f"; echo
+          done
+
+      - name: Patch project for Android 11 (API 30)
+        run: |
+          sed -i 's/darwin-x86_64/linux-x86_64/g' android/Makefile
+          sed -i '/sips -Z 432/d' android/Makefile
+          sed -i 's/aarch64-linux-android35-clang/aarch64-linux-android30-clang/g' android/Makefile
+          sed -i 's/--min-api 34/--min-api 30/g' android/Makefile
+          sed -i 's/MIN_SDK = TARGET_SDK = 35/MIN_SDK = 30\nTARGET_SDK = 35/' android/tools/apk.py
+          cat << 'EOF' >> android/compat/darwin.h
+
+          #ifndef __ASSEMBLER__
+          #include <time.h>
+          #include <stdlib.h>
+          #if defined(__ANDROID__) && __ANDROID_API__ < 35
+          static inline timezone_t tzalloc(const char *name) { (void)name; return (timezone_t)1; }
+          static inline void tzfree(timezone_t tz) { (void)tz; }
+          static inline struct tm *localtime_rz(timezone_t tz, const time_t *timep, struct tm *result) { (void)tz; return localtime_r(timep, result); }
+          #endif
+          #endif
+          EOF
+          mkdir -p android/build/manosaba-jp
+          cp release-assets/AppIcon.png android/build/manosaba-jp/icon.png
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install spirv-cross
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y spirv-cross || true
+          if ! command -v spirv-cross >/dev/null; then
+            git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Cross /tmp/sc
+            cmake -S /tmp/sc -B /tmp/sc/build -DCMAKE_BUILD_TYPE=Release -DSPIRV_CROSS_CLI=ON -DSPIRV_CROSS_ENABLE_TESTS=OFF
+            cmake --build /tmp/sc/build -j
+            sudo cmake --install /tmp/sc/build
+          fi
+          spirv-cross --help | head -1
+
+      - name: Build dmsh_xlate
+        run: |
+          set -euo pipefail
+          OUT="$DM_ROOT/build/gfx/dmsh_xlate"
+          dotnet build -c Release gfx/tools/dmsh_xlate/dmsh_xlate.csproj -o "$OUT"
+          XLATE="$OUT/dmsh_xlate"
+          if [ ! -x "$XLATE" ] && [ -f "$OUT/dmsh_xlate.dll" ]; then
+            printf '#!/bin/sh\nexec dotnet "$(dirname "$0")/dmsh_xlate.dll" "$@"\n' > "$XLATE"
+            chmod +x "$XLATE"
+          fi
+          "$XLATE" --source-sha || true
+
+      - name: Build the JP Vulkan shader bundle
+        run: |
+          set -euo pipefail
+          NDK_FAKE=/tmp/fake-ndk
+          mkdir -p "$NDK_FAKE/shader-tools"
+          ln -sfn "$ANDROID_HOME/ndk/$NDK_VERSION/shader-tools/linux-x86_64" "$NDK_FAKE/shader-tools/darwin-x86_64"
+          export NDK="$NDK_FAKE"
+          export DM_GAME=manosaba-jp
+          export XLATE="$DM_ROOT/build/gfx/dmsh_xlate/dmsh_xlate"
+          export DOTNET_ROOT="$(dirname "$(readlink -f "$(command -v dotnet)")")"
+          mkdir -p "$DM_ROOT/build/android"
+          python3 gfx/tools/dmsh_vk.py \
+            release-assets/captures \
+            "$DM_ROOT/build/android/manosaba-jp.dmvk" \
+            2>&1 | tee /tmp/dmvk.log
+          python3 - <<'P'
+          import struct, os, sys
+          p = os.environ["DM_ROOT"] + "/build/android/manosaba-jp.dmvk"
+          b = open(p, "rb").read(12)
+          assert b[:4] == b"DMVK", f"not a DMVK bundle: {b[:4]!r}"
+          v, n = struct.unpack("<II", b[4:])
+          print(f"bundle: {p}  version {v}  {n} shaders  {os.path.getsize(p)/1e6:.1f} MB")
+          if n < 2000: sys.exit(f"too few shaders: {n}")
+          P
+
+      - name: Build JP APK
+        run: |
+          set -euo pipefail
+          PRODUCT_PATH="$DM_ROOT/${{ steps.ws.outputs.product }}"
+          SHADERS_PATH="$DM_ROOT/build/android/manosaba-jp.dmvk"
+          [ -s "$SHADERS_PATH" ] || { echo "shader bundle missing"; exit 1; }
+          make -C android \
+            GAME="$DM_GAME" \
+            CC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang" \
+            NDK="$ANDROID_HOME/ndk/$NDK_VERSION" \
+            ANDROID_SDK="$ANDROID_HOME" \
+            JAVA_HOME="$JAVA_HOME" \
+            D8="$ANDROID_HOME/build-tools/35.0.1/d8" \
+            ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar" \
+            PRODUCT="$PRODUCT_PATH" \
+            SHADERS="$SHADERS_PATH" \
+            PKG=io.github.iceorange_dev.manosaba.jp \
+            apk
+
+      - name: Locate JP APK
+        id: find-apk
+        run: |
+          set -euo pipefail
+          APK=$(find android/build -type f -name '*.apk' ! -name '*-data.apk' | head -n1)
+          [ -n "$APK" ] || { echo "APK not found"; exit 1; }
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          echo "Built: $APK ($(du -h "$APK" | cut -f1))"
+
+      - name: Upload JP APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: manosaba-jp-apk
+          path: ${{ steps.find-apk.outputs.apk }}
+          if-no-files-found: error
